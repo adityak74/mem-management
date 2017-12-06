@@ -11,6 +11,7 @@
 #include <sys/wait.h>
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/msg.h>
 #include <time.h>
 
 #include "shm_header.h"
@@ -25,6 +26,18 @@ shmMsg *ossShmMsg;
 const int QUIT_TIMEOUT = 10;
 volatile sig_atomic_t sigNotReceived = 1;
 int processNumber = 0;
+struct msqid_ds msqid_buf;
+key_t masterKey = 128464;
+key_t slaveKey = 120314;
+int slaveQueueId;
+int masterQueueId;
+void sendMessage(int, int, long long);
+
+int readOrWrite() {
+	int choice = rand() % 1;
+	return choice;
+}
+
 
 // wait for semaphore
 pid_t r_wait(int *stat_loc) {
@@ -97,6 +110,11 @@ int main(int argc, char const *argv[])
 		exit(1);
 	}
 
+	if((masterQueueId = msgget(masterKey, IPC_CREAT | 0777)) == -1) {
+		perror("    Slave msgget for master queue");
+		exit(-1);
+	}
+
 	//Ignore SIGINT so that it can be handled below
 	signal(SIGINT, intHandler);
 
@@ -125,7 +143,7 @@ int main(int argc, char const *argv[])
 	  return 1;
 	}
 
-	while (sem_wait(semlockp) == -1)                         /* entry section */ 
+	while (sem_wait(semlockp) == -1 && shpinfo->sigNotReceived)                         /* entry section */ 
        if (errno != EINTR) { 
           perror("Failed to lock semlock");
           return 1;
@@ -167,12 +185,22 @@ int main(int argc, char const *argv[])
 	if (r_wait(NULL) == -1)                              /* remainder section */
 	  return 1;
 
+	sendMessage(masterQueueId, 3, ossShmMsg -> seconds * NANO_MOD + ossShmMsg -> nanoseconds);
+
 	if(shmdt(shpinfo) == -1) {
 		perror("    Slave could not detach shared memory");
 	}
 
 	if(shmdt(ossShmMsg) == -1) {
 		perror("    Slave could not detach shared memory");
+	}
+
+	msgctl(masterQueueId, IPC_STAT, &msqid_buf);
+
+	if(shpinfo->sigNotReceived) {
+		while(msqid_buf.msg_qnum != 0) {
+		msgctl(masterQueueId, IPC_STAT, &msqid_buf);
+		}
 	}
 
   	// END
@@ -183,6 +211,24 @@ int main(int argc, char const *argv[])
 	printf("    Slave error\n");
 
 	return 0;
+}
+
+// send message
+void sendMessage(int qid, int msgtype, long long finishTime) {
+  struct msgbuf msg;
+
+  msg.mType = msgtype;
+  if(qid == slaveQueueId) {
+    sprintf(msg.mText, "Consumed message from slave %d\n", processNumber);
+  }
+  if(qid == masterQueueId) {
+    sprintf(msg.mText, "%llu.%09llu\n", finishTime / NANO_MOD, finishTime % NANO_MOD);
+  }
+
+  if(msgsnd(qid, (void *) &msg, sizeof(msg.mText), IPC_NOWAIT) == -1) {
+    perror("    Slave msgsnd error");
+  }
+
 }
 
 //This handles SIGQUIT being sent from parent process

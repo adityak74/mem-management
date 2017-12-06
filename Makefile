@@ -8,7 +8,7 @@ TARGETS	= oss user
 OBJS	= oss.o user.o
 SRCDIR  = src
 HEADER = shm_header.h
-LDFLAGS = -pthread
+LDFLAGS = -pthread -lpthread
 
 all: $(TARGETS)
 

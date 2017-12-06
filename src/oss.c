@@ -7,6 +7,7 @@
 #include <sys/shm.h>
 #include <semaphore.h>
 #include <sys/stat.h>
+#include <sys/msg.h>
 #include <fcntl.h>
 #include <string.h>
 #include <unistd.h>
@@ -17,16 +18,33 @@
 #include "shm_header.h"
 
 #define PERM 0666
-#define MAXCHILD 20
+#define MAXCHILD 18
+
 
 const int TOTAL_SLAVES = 100;
 const int MAXSLAVES = 20;
-const long long INCREMENTER = 4000;
+const long long INCREMENTER = 40;
+long long int nextProcessSpawnTime = 0;
+
+//initialize frame stuff
+const int TOTAL_FRAMES = 256; // each frame is 1k = 1024
+static int free_frames = 0;
+int num_mem_access = 0;
+int num_page_faults = 0;
+int allocated_frames[TOTAL_FRAMES] = {0};
 
 void showHelpMessage();
 void intHandler(int);
 void spawnChildren(int);
 void cleanup();
+void sweep_daemon();
+int nextSpawnTime();
+void setNextSpawnTime();
+void sendMessage(int, int);
+void processDeath(int, int, FILE*);
+
+// get the page for the request
+void get_page();
 
 static int max_processes_at_instant = 1; // to count the max running processes at any instance
 int process_spawned = 0; // hold the process number
@@ -39,12 +57,15 @@ shared_oss_struct *shpinfo;
 shmMsg *ossShmMsg;
 int timerVal;
 int numChildren;
+int slaveQueueId;
+int masterQueueId;
 char *short_options = "hs:l:t:";
 char *default_logname = "default.log";
 char c;
 FILE* file;
 int status;
 int messageReceived = 0;
+struct msqid_ds msqid_ds_buf;
 
 char *i_arg;
 char *m_arg;
@@ -58,6 +79,8 @@ int main(int argc, char const *argv[])
 	int helpflag = 0;
 	int nonoptargflag = 0;
 	int index;
+	key_t masterKey = 128464;
+  	key_t slaveKey = 120314;
 
 	// memory for args
 	i_arg = malloc(sizeof(char)*20);
@@ -76,8 +99,8 @@ int main(int argc, char const *argv[])
 		case 's':
 			numChildren = atoi(optarg);
 			if(numChildren > MAXCHILD) {
-			  numChildren = 20;
-			  fprintf(stderr, "No more than 20 child processes allowed at one instance. Reverting to 20.\n");
+			  numChildren = MAXCHILD;
+			  fprintf(stderr, "No more than 18 child processes allowed at one instance. Reverting to 18.\n");
 			}
 			break;
 		case 't':
@@ -93,7 +116,7 @@ int main(int argc, char const *argv[])
 			}
 			else if (optopt == 't') {
 			  fprintf(stderr, "Option -%c requires an argument. Using default value [20].\n", optopt);
-			  timerVal = 20;
+			  timerVal = 50;
 			}
 			else if( optopt == 'l') {
 			  fprintf(stderr, "Option -%c requires an argument. Using default value [default.log] .\n", optopt);
@@ -149,6 +172,16 @@ int main(int argc, char const *argv[])
 	// key = SHM_KEY;
 	if(key == (key_t)-1) {
 		fprintf(stderr, "Failed to derive key\n");
+	}
+
+	if((slaveQueueId = msgget(slaveKey, IPC_CREAT | 0777)) == -1) {
+		perror("Master msgget for slave queue");
+		exit(-1);
+	}
+
+	if((masterQueueId = msgget(masterKey, IPC_CREAT | 0777)) == -1) {
+		perror("Master msgget for master queue");
+		exit(-1);
 	}
 
 	shmid = shmget(key, sizeof(shared_oss_struct), IPC_CREAT | 0777);
@@ -213,11 +246,26 @@ int main(int argc, char const *argv[])
 	fprintf(file,"***** BEGIN LOG *****\n");
 
 	// Fork Off Processes
-	spawnChildren(numChildren);
+	spawnChildren(MAXCHILD - 1);
 
 	// loop through clock and keep checking shmMsg
 
-	while(messageReceived < TOTAL_SLAVES && shpinfo -> seconds < 2 && shpinfo->sigNotReceived) {
+	//while(messageReceived < TOTAL_SLAVES && shpinfo -> seconds < 2 && shpinfo->sigNotReceived) {
+	while(messageReceived < TOTAL_SLAVES && shpinfo -> seconds < 20 && shpinfo->sigNotReceived) {
+
+		if ( nextSpawnTime() && max_processes_at_instant < MAXCHILD) {
+			if ( max_processes_at_instant < MAXCHILD ) {
+				spawnChildren(MAXCHILD - max_processes_at_instant); // spawn upto max 18 processes
+				setNextSpawnTime();
+			} else {
+				setNextSpawnTime();
+				if ( DEBUG )
+					fprintf(stderr, "MAX PROCESSES HIT. TRYING TO SPAWN IN NEXT TIME.");
+			}
+			if ( DEBUG )
+				fprintf(stderr, "MAX PROCESSES RUNNING NOW : %d\n", max_processes_at_instant);
+			
+		}
 		
 		//fprintf(stderr, "CURRENT MASTER TIME : %ld.%ld\n", shpinfo -> seconds, shpinfo -> nanoseconds);
 		shpinfo -> nanoseconds += INCREMENTER;
@@ -227,13 +275,14 @@ int main(int argc, char const *argv[])
 		}
 
 		if ( ossShmMsg -> procID != -1 ) {
-			fprintf(file, "Master: Child %d is terminating at %lld.%lld at my time %lld.%lld\n\n", ossShmMsg -> procID, ossShmMsg -> seconds, ossShmMsg -> nanoseconds, shpinfo -> seconds, shpinfo -> nanoseconds);
+			fprintf(file, "Master: Child %d is terminating at %lld.%lld at my time %lld.%lld\n", ossShmMsg -> procID, ossShmMsg -> seconds, ossShmMsg -> nanoseconds, shpinfo -> seconds, shpinfo -> nanoseconds);
+			fprintf(file, "MAX PROCESSES RUNNING AT OSS %lld.%lld : %d\n\n", shpinfo -> seconds, shpinfo -> nanoseconds, max_processes_at_instant);
 			ossShmMsg -> procID = -1;
+			max_processes_at_instant--;
 		}
 
-		if(max_processes_at_instant <= TOTAL_SLAVES) {
-	      spawnChildren(1);
-	    }
+		//processDeath(masterQueueId, 3, file);
+
 	    //fprintf(stderr, "CURRENT MASTER TIME : %ld.%ld\n", shpinfo -> seconds, shpinfo -> nanoseconds);
 	}
 
@@ -246,6 +295,20 @@ int main(int argc, char const *argv[])
 	}
 
 	return 0;
+}
+
+void processDeath(int qid, int msgtype, FILE *file) {
+  struct msgbuf msg;
+  if(msgrcv(qid, (void *) &msg, sizeof(msg.mText), msgtype, MSG_NOERROR | IPC_NOWAIT) == -1) {
+    if(errno != ENOMSG) {
+      perror("Master msgrcv");
+    }
+  }
+  else {
+    msgctl(masterQueueId, IPC_STAT, &msqid_ds_buf);
+    messageReceived++;
+    max_processes_at_instant--;
+  }
 }
 
 // spawnChildren function
@@ -310,7 +373,7 @@ void cleanup() {
   free(x_arg);
   printf("Master waiting on all processes do die\n");
   childpid = wait(&status);
-
+  	
   printf("Master about to detach from shared memory\n");
   //Detach and remove the shared memory after all child process have died
   if(detachAndRemove(shmid, shpinfo) == -1) {
@@ -340,11 +403,33 @@ void intHandler(int SIGVAL) {
 	}
 
 	if(SIGVAL == SIGALRM) {
-		fprintf(stderr, "%sMaster timed out. Terminating rest all process.\n");
+		fprintf(stderr, "Master timed out. Terminating rest all process.\n");
 	}
 
 	kill(-getpgrp(), SIGQUIT);
 
+}
+
+// sweep daemon function to sweep the whole page table
+void sweep_daemon() {
+	// sweep tables here
+}
+
+// setting next spawn time
+void setNextSpawnTime() {
+	nextProcessSpawnTime = (shpinfo -> seconds * NANO_MOD) + shpinfo -> nanoseconds + (rand() % 500000000 + 1000000); // add 1-500 ms randomly
+	if ( DEBUG )
+		fprintf(stderr, "\nNext child spawn time : %lld.%lld.\n\n", nextProcessSpawnTime / NANO_MOD, nextProcessSpawnTime % NANO_MOD );
+}
+
+// check for next spawn time
+int nextSpawnTime() {
+	if ( ((shpinfo -> seconds * NANO_MOD) + shpinfo -> nanoseconds) >= nextProcessSpawnTime ) {
+		if ( DEBUG )
+			fprintf(stderr, "\nNext child spawn time hit at : %lld.%lld.\n\n", nextProcessSpawnTime / NANO_MOD, nextProcessSpawnTime % NANO_MOD );
+		return 1;
+	}
+	return 0;
 }
 
 // help message for running options
