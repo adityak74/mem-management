@@ -21,18 +21,29 @@ typedef struct
 	long long seconds;
 	long long nanoseconds;
 	pid_t procID;
+	int pageNumRequested;
+	int readwrite;
 } shmMsg;
 
-struct Page {
+typedef struct {
+	int pageID;
 	int dirty;
 	int unused;
+	int valid;
 	int second_chance;
-	int frame[FRAME_SIZE];
+	int frameContent[FRAME_SIZE];
 } Page;
 
-struct PageTable {
-	int valid[256];
-	struct Page page[256];
+typedef struct {
+	Page page;
+	int isFrameAssigned;
+	int referenceBit;
+} Frame;
+
+typedef struct {
+	Frame frames[256];
+	int frameID;
+	int delimiter;
 } PageTable;
 
 typedef struct msgbuf {

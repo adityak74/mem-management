@@ -19,6 +19,7 @@
 #define PERM 0666
 #define PERMS (mode_t)(S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH)
 #define FLAGS (O_CREAT | O_EXCL)
+#define MAXFRAMES 256
 
 pid_t myPid;
 shared_oss_struct *shpinfo;
@@ -31,13 +32,35 @@ key_t masterKey = 128464;
 key_t slaveKey = 120314;
 int slaveQueueId;
 int masterQueueId;
+PageTable *userPageTable;
 void sendMessage(int, int, long long);
+
+// sweep daemon function to sweep the whole page table
+void sweep_daemon() {
+	// sweep tables here
+	// calc free frame here
+	int free_frames = 0, iter = 0;
+
+	for(iter = 0; iter < MAXFRAMES; iter++){
+		if(userPageTable -> frames[iter].page.valid == 0)
+			free_frames++;
+	}
+
+	if ( free_frames < (0.1 * MAXFRAMES) ) {
+
+	}
+}
 
 int mem_access = 0, max_mem_access = 0;
 
 int readOrWrite() {
-	int choice = rand() % 1;
+	int choice = rand() % 2;
 	return choice;
+}
+
+int get_page() { 
+	int pageNumRequested = rand() % 576;
+	return pageNumRequested;
 }
 
 
@@ -68,12 +91,12 @@ void zombieKiller(int);
 int main(int argc, char const *argv[])
 {
 
-	int shmid = 0, shmMsgID = 0;
+	int shmid = 0, shmMsgID = 0, shmPageTableID = 0;
 	long start_seconds, start_nanoseconds;
 	long current_seconds, current_nanoseconds;
 	long long currentTime;
 	myPid = getpid();
-	char *short_options = "i:s:k:x:";
+	char *short_options = "i:s:k:x:p:";
 	int maxproc;
 	char c;
 	sem_t *semlockp;
@@ -94,6 +117,9 @@ int main(int argc, char const *argv[])
 			case 'x':
 				shmMsgID = atoi(optarg);
 				break;
+			case 'p':
+				shmPageTableID = atoi(optarg);
+				break;
 			case '?':
 				fprintf(stderr, "    Arguments were not passed correctly to slave %d. Terminating.", myPid);
 				exit(-1);
@@ -108,6 +134,11 @@ int main(int argc, char const *argv[])
 	}
 
 	if((ossShmMsg = (shmMsg *)shmat(shmMsgID, NULL, 0)) == (void *) -1) {
+		perror("    Slave could not attach shared mem");
+		exit(1);
+	}
+
+	if((userPageTable = (PageTable *)shmat(shmPageTableID, NULL, 0)) == (void *) -1) {
 		perror("    Slave could not attach shared mem");
 		exit(1);
 	}
@@ -156,7 +187,7 @@ int main(int argc, char const *argv[])
 
     // CRITICAL SECTION
 
-    fprintf(stderr, "USER PROCNUM# :%d CLOCK READ : %lld %lld\n", getpid() ,shpinfo -> seconds, shpinfo -> nanoseconds);
+    // fprintf(stderr, "USER PROCNUM# :%d CLOCK READ : %lld %lld\n", getpid() ,shpinfo -> seconds, shpinfo -> nanoseconds);
 
     while(1) {
 			if(shpinfo->sigNotReceived) {
@@ -179,6 +210,8 @@ int main(int argc, char const *argv[])
 	ossShmMsg -> procID = getpid();
 	ossShmMsg -> seconds = shpinfo -> seconds;
 	ossShmMsg -> nanoseconds = shpinfo -> nanoseconds;
+	ossShmMsg -> pageNumRequested = get_page();
+	ossShmMsg -> readwrite = readOrWrite();
     // CRITICAL ENDS
 	
 	if (sem_post(semlockp) == -1) {                           /* exit section */

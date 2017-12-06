@@ -19,6 +19,7 @@
 
 #define PERM 0666
 #define MAXCHILD 18
+#define MAXFRAMES 256
 
 
 const int TOTAL_SLAVES = 100;
@@ -33,6 +34,8 @@ static int free_frames = 0;
 int num_mem_access = 0;
 int num_page_faults = 0;
 int allocated_frames[TOTAL_FRAMES] = {0};
+PageTable *mainPageTable;
+void second_chance_alloc();
 
 void showHelpMessage();
 void intHandler(int);
@@ -44,14 +47,13 @@ void setNextSpawnTime();
 void sendMessage(int, int);
 void processDeath(int, int, FILE*);
 
-// get the page for the request
-void get_page();
-
 static int max_processes_at_instant = 1; // to count the max running processes at any instance
 int process_spawned = 0; // hold the process number
 volatile sig_atomic_t cleanupCalled = 0;
 key_t key;
 key_t shMsgIDKey = 1234;
+key_t shmPageTableIDKey = 1235;
+int shmPageTableID;
 int shmid, shmMsgID, semid, i;
 pid_t childpid;
 shared_oss_struct *shpinfo;
@@ -73,6 +75,7 @@ char *m_arg;
 char *x_arg;
 char *s_arg;
 char *k_arg;
+char *p_arg;
 
 int main(int argc, char const *argv[])
 {
@@ -83,12 +86,16 @@ int main(int argc, char const *argv[])
 	key_t masterKey = 128464;
   	key_t slaveKey = 120314;
 
+	// create the queue
+	create();
+
 	// memory for args
 	i_arg = malloc(sizeof(char)*20);
 	m_arg = malloc(sizeof(char)*20);
 	x_arg = malloc(sizeof(char)*20);
 	s_arg = malloc(sizeof(char)*20);
 	k_arg = malloc(sizeof(char)*20); 
+	p_arg = malloc(sizeof(char)*20);
 
 	opterr = 0;
 
@@ -237,6 +244,37 @@ int main(int argc, char const *argv[])
 
 	}
 
+	shmPageTableID = shmget(shmPageTableIDKey, sizeof(PageTable), IPC_CREAT | 0777);
+	if((shmPageTableID == -1) && (errno != EEXIST)){
+		perror("Unable to create shared mem");
+		exit(-1);
+	}
+	if(shmPageTableID == -1) {
+		if (((shmPageTableID = shmget(shmPageTableIDKey, sizeof(PageTable), PERM)) == -1) || 
+			(mainPageTable = (PageTable*)shmat(shmPageTableID, NULL, 0) == (void *)-1) ) {
+			perror("Unable to attach existing shared memory");
+			exit(-1);
+		}
+	} else {
+		mainPageTable = (PageTable*)shmat(shmPageTableID, NULL, 0);
+		if(mainPageTable == (void *)-1){
+			perror("Couldn't attach the shared mem");
+			exit(-1);
+		}
+
+		for (i=0; i < MAXFRAMES; i++) {
+			mainPageTable->frameID = i; 
+			mainPageTable->frames[i].isFrameAssigned = 0;
+			mainPageTable->frames[i].referenceBit = -1;  // -1 unused, ,0 - used, 1 - second chance
+			mainPageTable->frames[i].page.pageID = -1;
+			mainPageTable->frames[i].page.unused = 1;
+			mainPageTable->frames[i].page.second_chance = 0; // if on a second chance its 1
+			mainPageTable->frames[i].page.dirty = 0; // initially not dirty
+			mainPageTable->frames[i].page.valid = 0; // 1 - valid, 0 - invalid
+		}
+
+	}
+
 	//Open file and mark the beginning of the new log
 	file = fopen(default_logname, "a");
 	if(!file) {
@@ -277,9 +315,20 @@ int main(int argc, char const *argv[])
 
 		if ( ossShmMsg -> procID != -1 ) {
 			fprintf(file, "Master: Child %d is terminating at %lld.%lld at my time %lld.%lld\n", ossShmMsg -> procID, ossShmMsg -> seconds, ossShmMsg -> nanoseconds, shpinfo -> seconds, shpinfo -> nanoseconds);
-			fprintf(file, "MAX PROCESSES RUNNING AT OSS %lld.%lld : %d\n\n", shpinfo -> seconds, shpinfo -> nanoseconds, max_processes_at_instant);
+			fprintf(file, "MAX PROCESSES RUNNING AT OSS %lld.%lld : %d\n", shpinfo -> seconds, shpinfo -> nanoseconds, max_processes_at_instant);
+			fprintf(file, "PAGE NUM REQUESTED : %d for R/W(0/1) : %d\n\n\n", ossShmMsg -> pageNumRequested, ossShmMsg -> readwrite);
 			ossShmMsg -> procID = -1;
 			max_processes_at_instant--;
+
+			// enqueue the request here
+			enq(ossShmMsg -> pageNumRequested);
+			//show the queue
+			fprintf(file, "Master: Page Frame Request Queue:\n");
+			display();
+			fprintf(file, "---\n\n");
+
+			// second chance page alloc algo
+			second_chance_alloc();
 		}
 
 		//processDeath(masterQueueId, 3, file);
@@ -334,9 +383,10 @@ void spawnChildren(int childrenCount) {
 			sprintf(i_arg, "%d", j);
 			sprintf(s_arg, "%d", max_processes_at_instant);
 			sprintf(x_arg, "%d", shmMsgID);
+			sprintf(p_arg, "%d", shmPageTableID);
 			// share shmid with children
 			sprintf(k_arg, "%d", shmid);
-			char *userOptions[] = {"./user", "-i", i_arg, "-s", s_arg, "-k", k_arg, "-x", x_arg, (char *)0};
+			char *userOptions[] = {"./user", "-i", i_arg, "-s", s_arg, "-k", k_arg, "-x", x_arg, "-p", p_arg, (char *)0};
 			execv("./user", userOptions);
 			fprintf(stderr, "Print if error %s\n");
 		}
@@ -411,13 +461,7 @@ void intHandler(int SIGVAL) {
 
 }
 
-// sweep daemon function to sweep the whole page table
-void sweep_daemon() {
-	// sweep tables here
-	if ( free_frames < (0.1 * TOTAL_FRAMES) ) {
 
-	}
-}
 
 // setting next spawn time
 void setNextSpawnTime() {
@@ -493,11 +537,14 @@ void display()
     }
     while (front1 != rear)
     {
-        printf("%d ", front1->pageNum);
+		//printf("%d ", front1->pageNum);
+		fprintf(file, "%d ", front1->pageNum);
         front1 = front1->ptr;
     }
-    if (front1 == rear)
-        printf("%d", front1->pageNum);
+    if (front1 == rear) {
+        //printf("%d", front1->pageNum);
+		fprintf(file, "%d ", front1->pageNum);
+	}
 }
  
 /* Dequeing the queue */
@@ -548,4 +595,39 @@ void empty()
         fprintf(stderr, "\n Queue empty");
     else
        fprintf(stderr, "Queue not empty");
+}
+
+
+void second_chance_alloc() { 
+	
+
+	int pos = 0, k = 0;
+	for( k = 0; k < MAXFRAMES; k++ ) {
+		if ( mainPageTable->frames[k].referenceBit == -1) {
+			pos = k;
+			mainPageTable->delimiter = pos;
+			break;
+		}
+	}
+
+	if( pos == MAXFRAMES - 1  ) {
+		fprintf(file, "Master: Page Table is full. Printing table");
+		// print table status here
+	}else { 
+		int pageNumRequested = frontelement();
+		// check if page is already in there
+		for( k = 0; k < MAXFRAMES; k++ ) {
+			if ( mainPageTable->frames[k].page.pageID == pageNumRequested) {
+				
+			}
+		}
+
+
+		
+		mainPageTable->frames[pos].page.pageID = pageNumRequested;
+		mainPageTable->frames[pos].referenceBit = 0;
+
+	}
+
+
 }
