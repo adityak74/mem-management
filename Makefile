@@ -1,6 +1,6 @@
 # Makefile for compiling oss and user program
 # Aditya Karnam
-# October, 2017
+# Dec, 2017
 # Added extra function to clen .log and .out files for easy testing
 
 CC	= gcc
