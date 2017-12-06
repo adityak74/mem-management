@@ -25,6 +25,7 @@ const int TOTAL_SLAVES = 100;
 const int MAXSLAVES = 20;
 const long long INCREMENTER = 40;
 long long int nextProcessSpawnTime = 0;
+int count = 0;
 
 //initialize frame stuff
 const int TOTAL_FRAMES = 256; // each frame is 1k = 1024
@@ -413,6 +414,9 @@ void intHandler(int SIGVAL) {
 // sweep daemon function to sweep the whole page table
 void sweep_daemon() {
 	// sweep tables here
+	if ( free_frames < (0.1 * TOTAL_FRAMES) ) {
+
+	}
 }
 
 // setting next spawn time
@@ -441,4 +445,107 @@ void showHelpMessage() {
     printf("\tThe default value is 'default.log' .\n");
     printf("-t: Allows you set the wait time for the master process until it kills the slaves and itself.\n");
     printf("\tThe default value is 20.\n");
+}
+
+/* Create an empty queue */
+void create()
+{
+    front = rear = NULL;
+}
+ 
+/* Returns queue size */
+void queuesize()
+{
+    fprintf(stderr, "\n Queue size : %d", count);
+}
+ 
+/* Enqueing the queue */
+void enq(int data)
+{
+    if (rear == NULL)
+    {
+        rear = (struct node *)malloc(1*sizeof(struct node));
+        rear->ptr = NULL;
+        rear->pageNum = data;
+        front = rear;
+    }
+    else
+    {
+        temp=(struct node *)malloc(1*sizeof(struct node));
+        rear->ptr = temp;
+        temp->pageNum = data;
+        temp->ptr = NULL;
+ 
+        rear = temp;
+    }
+    count++;
+}
+ 
+/* Displaying the queue elements */
+void display()
+{
+    front1 = front;
+ 
+    if ((front1 == NULL) && (rear == NULL))
+    {
+        printf("Queue is empty");
+        return;
+    }
+    while (front1 != rear)
+    {
+        printf("%d ", front1->pageNum);
+        front1 = front1->ptr;
+    }
+    if (front1 == rear)
+        printf("%d", front1->pageNum);
+}
+ 
+/* Dequeing the queue */
+int deq()
+{
+	int pageNumberDeq = -1;
+    front1 = front;
+ 
+    if (front1 == NULL)
+    {
+        printf("\n Error: Trying to display elements from empty queue");
+        return -1;
+    }
+    else
+        if (front1->ptr != NULL)
+        {
+            front1 = front1->ptr;
+            printf("\n Dequed value : %d", front->pageNum);
+			pageNumberDeq = front->pageNum;
+            free(front);
+            front = front1;
+        }
+        else
+        {
+			pageNumberDeq = front->pageNum;
+            printf("\n Dequed value : %d", front->pageNum);
+            free(front);
+            front = NULL;
+            rear = NULL;
+        }
+        count--;
+		return pageNumberDeq;
+}
+ 
+/* Returns the front element of queue */
+int frontelement()
+{
+    if ((front != NULL) && (rear != NULL))
+        return(front->pageNum);
+    else
+        return 0;
+}
+ 
+/* Display if queue is empty or not */
+void empty()
+{
+     if ((front == NULL) && (rear == NULL))
+        fprintf(stderr, "\n Queue empty");
+    else
+       fprintf(stderr, "Queue not empty");
 }
