@@ -4,7 +4,7 @@
 // #define SHM_KEY 19942017
 #define MAX_BUF_SIZE 1024
 
-#define DEBUG 1
+#define DEBUG 0
 #define NANO_MOD 1000000000
 
 typedef struct 

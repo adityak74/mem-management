@@ -33,6 +33,8 @@ int slaveQueueId;
 int masterQueueId;
 void sendMessage(int, int, long long);
 
+int mem_access = 0, max_mem_access = 0;
+
 int readOrWrite() {
 	int choice = rand() % 1;
 	return choice;
@@ -97,7 +99,7 @@ int main(int argc, char const *argv[])
 				exit(-1);
 		}
 
- 	srand(time(NULL) + processNumber);
+ 	srand(time(NULL) + myPid);
 
  	//Trying to attach to shared memory
 	if((shpinfo = (shared_oss_struct *)shmat(shmid, NULL, 0)) == (void *) -1) {
@@ -134,7 +136,10 @@ int main(int argc, char const *argv[])
 
 	start_seconds = shpinfo -> seconds;
 	start_nanoseconds = shpinfo -> nanoseconds;
-  	long long startTime = start_seconds*1000000000 + start_nanoseconds;
+  long long startTime = start_seconds*1000000000 + start_nanoseconds;
+
+	max_mem_access = 1000 + ( (rand() % 100) - 100 );
+	fprintf(stderr, "\n    Slave Max termination mem access : %d for PID : %d\n\n", max_mem_access, myPid);
 
   	// SEMAPHORE EXCLUSION
 
@@ -154,16 +159,16 @@ int main(int argc, char const *argv[])
     fprintf(stderr, "USER PROCNUM# :%d CLOCK READ : %lld %lld\n", getpid() ,shpinfo -> seconds, shpinfo -> nanoseconds);
 
     while(1) {
-		if(shpinfo->sigNotReceived) {
-		  // something
-		  if(currentTime = ( (shpinfo -> seconds * 1000000000 + shpinfo -> nanoseconds) - startTime) >= duration) {
-		    break;
-		  }
-		  // something
-		}
-		else {
-		  break;
-		}
+			if(shpinfo->sigNotReceived) {
+				// something
+				if(currentTime = ( (shpinfo -> seconds * 1000000000 + shpinfo -> nanoseconds) - startTime) >= duration) {
+					break;
+				}
+				// something
+			}
+			else {
+				break;
+			}
 	}
 
 	// wait if any other process data in the sharedMessage
@@ -204,7 +209,7 @@ int main(int argc, char const *argv[])
 	}
 
   	// END
-  	printf("    Slave %d exiting\n", processNumber);
+  printf("    Slave %d exiting\n", processNumber);
 	kill(myPid, SIGTERM);
 	sleep(1);
 	kill(myPid, SIGKILL);
