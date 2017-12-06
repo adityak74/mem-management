@@ -27,6 +27,7 @@ const int MAXSLAVES = 20;
 const long long INCREMENTER = 40;
 long long int nextProcessSpawnTime = 0;
 int count = 0;
+int victims[999999] = {-1};
 
 //initialize frame stuff
 const int TOTAL_FRAMES = 256; // each frame is 1k = 1024
@@ -36,6 +37,7 @@ int num_page_faults = 0;
 int allocated_frames[TOTAL_FRAMES] = {0};
 PageTable *mainPageTable;
 void second_chance_alloc();
+void display_page_table();
 
 void showHelpMessage();
 void intHandler(int);
@@ -172,7 +174,7 @@ int main(int argc, char const *argv[])
 	signal(SIGQUIT, SIG_IGN);
 
 	//set alarm
-	alarm(timerVal);
+	alarm(200);
 
 	// generate key using ftok
 	key = ftok(".", 'c');
@@ -268,7 +270,7 @@ int main(int argc, char const *argv[])
 			mainPageTable->frames[i].referenceBit = -1;  // -1 unused, ,0 - used, 1 - second chance
 			mainPageTable->frames[i].page.pageID = -1;
 			mainPageTable->frames[i].page.unused = 1;
-			mainPageTable->frames[i].page.second_chance = 0; // if on a second chance its 1
+			mainPageTable->frames[i].page.second_chance = 0; // if on a second chance its 2, [0,1,2]
 			mainPageTable->frames[i].page.dirty = 0; // initially not dirty
 			mainPageTable->frames[i].page.valid = 0; // 1 - valid, 0 - invalid
 		}
@@ -290,7 +292,7 @@ int main(int argc, char const *argv[])
 	// loop through clock and keep checking shmMsg
 
 	//while(messageReceived < TOTAL_SLAVES && shpinfo -> seconds < 2 && shpinfo->sigNotReceived) {
-	while(messageReceived < TOTAL_SLAVES && shpinfo -> seconds < 20 && shpinfo->sigNotReceived) {
+	while(messageReceived < TOTAL_SLAVES && shpinfo -> seconds < 150 && shpinfo->sigNotReceived) {
 
 		if ( nextSpawnTime() && max_processes_at_instant < MAXCHILD) {
 			if ( max_processes_at_instant < MAXCHILD ) {
@@ -311,6 +313,7 @@ int main(int argc, char const *argv[])
 		if( shpinfo -> nanoseconds == 1000000000 ) {
 			shpinfo -> seconds += 1;
 			shpinfo -> nanoseconds = 0;
+			display_page_table();
 		}
 
 		if ( ossShmMsg -> procID != -1 ) {
@@ -331,6 +334,7 @@ int main(int argc, char const *argv[])
 			second_chance_alloc();
 		}
 
+		
 		//processDeath(masterQueueId, 3, file);
 
 	    //fprintf(stderr, "CURRENT MASTER TIME : %ld.%ld\n", shpinfo -> seconds, shpinfo -> nanoseconds);
@@ -599,35 +603,101 @@ void empty()
 
 
 void second_chance_alloc() { 
-	
 
-	int pos = 0, k = 0;
+	int pos = 0, k = 0, page_found = 0;
+	int pageNumRequested = frontelement();
+	// check if page is already in there
 	for( k = 0; k < MAXFRAMES; k++ ) {
-		if ( mainPageTable->frames[k].referenceBit == -1) {
+		if ( mainPageTable->frames[k].page.pageID == pageNumRequested) {
+			page_found = 1;
 			pos = k;
-			mainPageTable->delimiter = pos;
 			break;
 		}
 	}
-
-	if( pos == MAXFRAMES - 1  ) {
-		fprintf(file, "Master: Page Table is full. Printing table");
-		// print table status here
-	}else { 
-		int pageNumRequested = frontelement();
-		// check if page is already in there
+	if( page_found ) {
+		// give a chance or set it to be removed from page table
+		if ( mainPageTable->frames[pos].referenceBit == 0 ){
+			if ( mainPageTable->frames[pos].page.second_chance != 2 ) {
+				mainPageTable->frames[pos].referenceBit = 1; // gets chance
+			}else{
+				mainPageTable->frames[pos].referenceBit = 0; // already given second chance
+				mainPageTable->frames[pos].page.dirty = 1;
+			}
+		} else if ( mainPageTable->frames[pos].referenceBit == 1 ) {
+			mainPageTable->frames[pos].referenceBit = 0;
+			mainPageTable->frames[pos].page.dirty = 1;
+			mainPageTable->frames[pos].page.second_chance += 1;
+		}
+	} else {
+		// check if page table has space
 		for( k = 0; k < MAXFRAMES; k++ ) {
-			if ( mainPageTable->frames[k].page.pageID == pageNumRequested) {
-				
+			if ( mainPageTable->frames[k].referenceBit == -1) {
+				pos = k;
+				mainPageTable->delimiter = pos;
+				break;
 			}
 		}
+		if(pos == MAXFRAMES) {
+			// page table full. Try to remove a page
+			int victim_index = -1, iter = 0;
+			while( mainPageTable->frames[iter].referenceBit != 1) {
+				iter++;
+			}
+			// remove the page
+			mainPageTable->frames[pos].page.pageID = -1;
+			mainPageTable->frames[pos].page.dirty = 1;
+			mainPageTable->frames[pos].page.unused = 1;
+			mainPageTable->frames[pos].page.valid = 0;
+			mainPageTable->frames[pos].referenceBit = -1;
 
+			// now add the new page
+			pageNumRequested = deq();
+			mainPageTable->frames[pos].page.pageID = pageNumRequested;
+			mainPageTable->frames[pos].page.dirty = 0;
+			mainPageTable->frames[pos].page.unused = 1;
+			mainPageTable->frames[pos].page.valid = 1;
+			mainPageTable->frames[pos].referenceBit = 0;
+			allocated_frames[pos] = 1;
+			num_page_faults++;
 
-		
-		mainPageTable->frames[pos].page.pageID = pageNumRequested;
-		mainPageTable->frames[pos].referenceBit = 0;
+		} else {
+			pageNumRequested = deq();
+			mainPageTable->frames[pos].page.pageID = pageNumRequested;
+			mainPageTable->frames[pos].page.dirty = 0;
+			mainPageTable->frames[pos].page.unused = 1;
+			mainPageTable->frames[pos].page.valid = 1;
+			mainPageTable->frames[pos].referenceBit = 0;
+			allocated_frames[pos] = 1;
+			num_page_faults++;
+			
+			// for( k=0; k < MAXFRAMES; k++ ) {
+			// 	if( victims[k] == -1 )
+			// 	break;
+			// }
+			// victims[k] = pos;
 
+		}
 	}
 
+}
 
+void display_page_table() {
+	int k = 0;
+	fprintf(file, "\nMaster: Frame Table at : %lld.%lld\n\n", shpinfo->seconds, shpinfo->nanoseconds);
+	for ( k = 0; k < MAXFRAMES; k++ ) {
+		if ( mainPageTable->frames[k].referenceBit == -1 )
+			fprintf(file, ".");
+		else if ( mainPageTable->frames[k].referenceBit == 0 && mainPageTable->frames[k].page.dirty == 1)
+			fprintf(file, "D");
+		else if ( mainPageTable->frames[k].referenceBit == 0 )
+			fprintf(file, "U");
+	}
+	fprintf(file, "\n");
+	for ( k = 0; k < MAXFRAMES; k++ ) {
+		if ( mainPageTable->frames[k].referenceBit == -1)
+			fprintf(file, "0");
+		else
+			fprintf(file, "%d", mainPageTable->frames[k].referenceBit);
+	}
+	fprintf(file, "\n---\n");
 }
