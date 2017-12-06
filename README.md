@@ -67,4 +67,4 @@ Sample message:
 Master: Child pid is terminating at my time xx.yy because it reached mm.nn in slave
 ```
 
-***OSS Shell*** : Project #3 as a part of CS4760. 
+***Memory Management*** : Project #6 as a part of CS4760. 
